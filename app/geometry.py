@@ -85,7 +85,24 @@ def arc_overlap_length(a: Arc, b: Arc) -> float:
     return total
 
 
+def arc_intersection(a: Arc, b: Arc) -> List[Segment]:
+    """两条钟位弧在环面上的交集（[0, 12] 上已合并的线性弧段，按起点排序）。
+
+    与 :func:`arc_overlap_length` 一致仅保留正长度交集（端点相接不产生弧段），
+    供修补覆盖核对做精确面积求交，避免外包框近似。
+    """
+    parts: List[Segment] = []
+    for sa in a:
+        for sb in b:
+            lo = max(sa[0], sb[0])
+            hi = min(sa[1], sb[1])
+            if hi > lo + _EPS:
+                parts.append((lo, hi))
+    return merge_segments(parts)
+
+
 def merge_segments(segments: List[Segment]) -> List[Segment]:
+    """合并一组线性闭区间，端点相接即合并。"""
     """合并一组线性闭区间，端点相接即合并。"""
     if not segments:
         return []

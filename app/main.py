@@ -20,6 +20,8 @@ from .schemas import (
     InspectionChangeReport,
     RecomputeRequest,
     RecomputeResponse,
+    RepairCoverageRequest,
+    RepairCoverageResponse,
     ReviewResponse,
 )
 
@@ -118,3 +120,13 @@ def get_inspection_changes(
     after: str = Query(..., description="后期巡检 inspection_id"),
 ) -> dict:
     return services.get_inspection_changes(turbine_id, blade_id, before, after)
+
+
+@app.post(
+    "/api/v1/repair-coverage",
+    tags=["修补覆盖核对"],
+    response_model=RepairCoverageResponse,
+    summary="只读修补覆盖核对：修补区域并集对巡检原始观察面积的覆盖率",
+)
+def repair_coverage(payload: RepairCoverageRequest) -> dict:
+    return services.repair_coverage(payload)

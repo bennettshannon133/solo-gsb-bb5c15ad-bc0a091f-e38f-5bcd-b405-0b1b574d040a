@@ -185,6 +185,96 @@ class ReviewResponse(BaseModel):
     trajectories: List[TrajectoryOut] = []
 
 
+class RepairRegion(BaseModel):
+    """一个修补区域：沿用观察的径向区间 + 顺时针钟位字段与校验。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    radius_start: float = Field(..., ge=0.0, description="修补区距叶根起始位置（米）")
+    radius_end: float = Field(..., ge=0.0, description="修补区距叶根终止位置（米）")
+    clock_start: float = Field(..., ge=0.0, le=12.0, description="修补区起始钟位（0/12 均为 12 点）")
+    clock_end: float = Field(..., ge=0.0, le=12.0,
+                             description="修补区终止钟位，沿顺时针，允许跨 12 点；起止相等为单点")
+
+    @field_validator("radius_end")
+    @classmethod
+    def _radius_order(cls, v, info):
+        start = info.data.get("radius_start")
+        if start is not None and v < start:
+            raise ValueError("radius_end 必须 >= radius_start")
+        return v
+
+
+class RepairCoverageRequest(BaseModel):
+    """只读修补覆盖核对请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turbine_id: str = Field(..., max_length=64, description="风机编号")
+    blade_id: str = Field(..., max_length=64, description="叶片编号")
+    inspection_id: str = Field(..., max_length=64, description="被核对巡检的 inspection_id")
+    regions: List[RepairRegion] = Field(
+        default_factory=list,
+        description="修补区域列表；空列表表示该巡检无修补（全部未覆盖）",
+    )
+
+
+class RepairCoverageItem(BaseModel):
+    """单条观察的修补覆盖核对结果。"""
+
+    observation_id: str
+    inspection_id: str
+    original_area: float = Field(
+        ..., description="原始观察面积（径向米 × 钟位小时）",
+    )
+    covered_area: float = Field(
+        ..., description="被修补区域并集覆盖的面积（重叠修补只计一次）",
+    )
+    coverage_ratio: Optional[float] = Field(
+        default=None, description="覆盖率 = 覆盖面积 / 原面积；零面积观察为 null",
+    )
+    status: Literal["uncovered", "partial", "full", "excluded"] = Field(
+        ..., description="uncovered=未覆盖，partial=部分覆盖，full=全覆盖，"
+                         "excluded=零面积观察不参与核对",
+    )
+    excluded_reason: Optional[Literal["zero_area"]] = Field(
+        default=None, description="excluded 时的原因（当前仅 zero_area）",
+    )
+
+
+class RepairCoverageSummary(BaseModel):
+    """覆盖核对汇总（仅统计参与核对的正面积观察）。"""
+
+    observation_count: int = Field(
+        ..., description="该巡检在该叶片下的原始观察总数（含零面积）",
+    )
+    checked_count: int = Field(..., description="参与核对的正面积观察条数")
+    excluded_count: int = Field(..., description="零面积、不参与核对的观察条数")
+    uncovered_count: int
+    partial_count: int
+    full_count: int
+    total_original_area: float
+    total_covered_area: float
+    total_coverage_ratio: Optional[float] = Field(
+        default=None,
+        description="总覆盖率 = 覆盖面积合计 / 原面积合计；无正面积观察时为 null",
+    )
+
+
+class RepairCoverageResponse(BaseModel):
+    """只读修补覆盖核对响应（不修改任何观察、裁决或复核结果）。"""
+
+    turbine_id: str
+    blade_id: str
+    inspection_id: str
+    region_count: int = Field(..., description="请求中的修补区域数量")
+    summary: RepairCoverageSummary
+    results: List[RepairCoverageItem] = Field(
+        default_factory=list,
+        description="逐条观察核对结果，按观察 ID 排序",
+    )
+
+
 class ChangeTrajectorySide(BaseModel):
     """变化报告中一侧（前期或后期）轨迹的摘要。"""
 

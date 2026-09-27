@@ -10,6 +10,9 @@
   重算时先应用必须同轨关系的传递闭包，再校验禁止同轨关系，冲突时返回 `409` 与冲突裁决链且**不改写旧结果**；
 - 提供**只读巡检变化报告**：输入风机、叶片与前后两个 `inspection_id`，对比两期轨迹的
   **持续 / 新增 / 消失**，跨期配对按“正长度重叠面积”加权并求**全局最大权一对一匹配**；
+- 提供**只读修补覆盖核对**：指定风机、叶片、巡检与修补区域列表，对该巡检的**原始观察**
+  逐条计算被修补区域**并集**覆盖的面积（径向米 × 钟位小时），重叠修补只计一次，
+  输出未覆盖 / 部分覆盖 / 全覆盖状态及零面积观察单列；
 - 依赖安装、SQLite 建表与数据库初始化均随容器启动自动完成。
 
 ## 单条命令启动
@@ -92,6 +95,7 @@ docker compose up -d --build
 | POST | `/adjudications` | 提交人工关联裁决（必须同轨/禁止同轨，乐观锁，幂等） |
 | GET | `/adjudications/{turbine_id}/{blade_id}` | 查询某叶片的全部裁决与当前 revision |
 | GET | `/inspection-changes/{turbine_id}/{blade_id}` | 只读巡检变化报告（两期轨迹持续/新增/消失对比） |
+| POST | `/repair-coverage` | 只读修补覆盖核对（修补区域并集对巡检原始观察面积的覆盖率） |
 
 ### 1. 写入观察批次
 
@@ -369,6 +373,84 @@ curl -s "http://localhost:8000/api/v1/inspection-changes/WT-A01/B2?before=drone-
 - 持续轨迹给出**代表等级与径向范围的前后值**以及**双方来源观察 ID**；`weight` 为配对权重（重叠面积之和）。
 - 轨迹 ID 与复核结果一致（同成员观察集合哈希），可与 `GET /reviews/...` 对照。
 
+### 7. 修补覆盖核对（只读）
+
+`POST /api/v1/repair-coverage`
+
+指定风机、叶片、巡检（`inspection_id`）与修补区域列表，读取该巡检的**原始观察**，
+逐条核对被修补区域**并集**覆盖的面积。接口只读、实时计算，**不修改观察、人工裁决
+或任何已落库的复核结果**。
+
+- 面积单位为**径向米 × 钟位小时**：原面积 = 径向长 × 钟位弧长；
+- 修补区域沿用观察的径向区间与**顺时针钟位区间**字段及校验（`0/12` 等价、
+  `radius_end >= radius_start`、钟位 `[0,12]`、**允许跨 12 点**、起止相等为单点）；
+- 多条修补先求**并集**再覆盖：相互重叠（含跨 12 点后两侧重叠）的修补只计一次；
+- 覆盖面积通过**径向切片**精确求解（条带内合并钟位交集弧长 × 条带径向长），
+  **不使用外包框或采样近似**；
+- 每条观察返回：`observation_id`、`original_area`（原面积）、`covered_area`
+  （覆盖面积）、`coverage_ratio`（覆盖率）、`status`：
+  - `uncovered` 未覆盖（覆盖面积为 0）；
+  - `partial` 部分覆盖；
+  - `full` 全覆盖；
+  - `excluded` **零面积观察**（径向零长或钟位单点）单列，不参与核对，
+    覆盖率为 `null`，`excluded_reason="zero_area"`；
+- **空区域列表** `regions: []` 表示该巡检无修补（全部正面积观察为 `uncovered`）；
+- 巡检在该风机/叶片下不存在 → `404`；非法区域（径向倒挂、钟位越界等）→ `422`。
+
+请求示例：
+
+```json
+{
+  "turbine_id": "WT-A01",
+  "blade_id": "B2",
+  "inspection_id": "drone-0901",
+  "regions": [
+    {"radius_start": 0.0, "radius_end": 5.0, "clock_start": 11.0, "clock_end": 12.0},
+    {"radius_start": 5.0, "radius_end": 10.0, "clock_start": 0.0, "clock_end": 1.0}
+  ]
+}
+```
+
+> 上例两条修补在径向 `5 米` 处拼接、各覆盖跨 12 点弧的一侧：对
+> `[0,10] × 11点→1点`（原面积 `10 × 2 = 20`）的观察，覆盖面积精确为
+> `5 × 1 + 5 × 1 = 10`（`partial`，覆盖率 `0.5`）——而不是外包框近似的 20。
+
+响应（节选）：
+
+```json
+{
+  "turbine_id": "WT-A01",
+  "blade_id": "B2",
+  "inspection_id": "drone-0901",
+  "region_count": 2,
+  "summary": {
+    "observation_count": 3,
+    "checked_count": 2,
+    "excluded_count": 1,
+    "uncovered_count": 1,
+    "partial_count": 1,
+    "full_count": 0,
+    "total_original_area": 60.0,
+    "total_covered_area": 10.0,
+    "total_coverage_ratio": 0.1667
+  },
+  "results": [
+    {
+      "observation_id": "s1",
+      "inspection_id": "drone-0901",
+      "original_area": 20.0,
+      "covered_area": 10.0,
+      "coverage_ratio": 0.5,
+      "status": "partial",
+      "excluded_reason": null
+    }
+  ]
+}
+```
+
+`summary` 汇总仅统计参与核对的正面积观察（`total_coverage_ratio =
+覆盖面积合计 / 原面积合计`，无正面积观察时为 `null`）；`results` 按观察 ID 排序。
+
 ## curl 快速验证
 
 ```bash
@@ -398,6 +480,14 @@ curl -s -X POST http://localhost:8000/api/v1/adjudications \
 curl -s http://localhost:8000/api/v1/adjudications/WT-A01/B2
 ```
 
+修补覆盖核对（空区域列表表示无修补）：
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/repair-coverage \
+  -H 'Content-Type: application/json' \
+  -d '{"turbine_id":"WT-A01","blade_id":"B2","inspection_id":"drone-0901","regions":[{"radius_start":2.0,"radius_end":6.0,"clock_start":11.0,"clock_end":1.0}]}'
+```
+
 ## 本地开发（不使用 Docker）
 
 ```bash
@@ -422,9 +512,10 @@ python -m unittest discover -s tests -v
 │   ├── services.py     # 写入幂等、重算、查询、巡检变化报告业务逻辑
 │   ├── clustering.py   # 并查集聚类 + 轨迹合并
 │   ├── matching.py     # 跨期轨迹配对：重叠面积加权 + 全局最大权一对一匹配
+│   ├── coverage.py     # 只读修补覆盖核对：径向切片精确求修补区域并集覆盖面积
 │   ├── geometry.py     # 径向/钟位弧相交、重叠长度与合并（含跨 12 点）
 │   └── db.py           # SQLite 连接、schema 初始化、数据访问
-├── tests/              # 几何 / 聚类 / 匹配 / 端到端 API 测试
+├── tests/              # 几何 / 聚类 / 匹配 / 覆盖核对 / 端到端 API 测试
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

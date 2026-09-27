@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import db
+from . import coverage as cov
 from .clustering import (
     Observation,
     Ruling,
@@ -19,7 +20,12 @@ from .clustering import (
     cluster_observations,
 )
 from .matching import match_trajectory_clusters
-from .schemas import AdjudicationRequest, BatchWriteRequest, ObservationIn
+from .schemas import (
+    AdjudicationRequest,
+    BatchWriteRequest,
+    ObservationIn,
+    RepairCoverageRequest,
+)
 
 
 class ApiError(Exception):
@@ -477,6 +483,75 @@ def get_inspection_changes(turbine_id: str, blade_id: str,
         "persisting": persisting,
         "new": new,
         "disappeared": disappeared,
+    }
+
+
+# --------------------------------------------------------- repair coverage
+
+def repair_coverage(req: RepairCoverageRequest) -> Dict[str, Any]:
+    """只读修补覆盖核对。
+
+    - 读取该巡检在指定风机/叶片下的**原始观察**（不使用轨迹/复核结果），
+      逐条计算被修补区域并集覆盖的面积；
+    - 修补区域沿用观察的径向区间 + 顺时针钟位弧字段（允许跨 12 点），
+      覆盖面积按径向切片精确求并集，重叠修补只计一次；
+    - 空区域列表表示无修补；零面积观察单列为 ``excluded``，不参与核对；
+    - 巡检（风机/叶片 + inspection_id）不存在返回 404；
+      非法区域由 pydantic 校验返回 422；
+    - 全程只读，不修改观察、人工裁决或复核结果。
+    """
+    with db.get_conn() as conn:
+        rows = db.list_observations(conn, req.turbine_id, req.blade_id)
+
+    observations = [
+        _row_to_observation(r) for r in rows
+        if r["inspection_id"] == req.inspection_id
+    ]
+    if not observations:
+        raise ApiError(
+            404,
+            f"该巡检在叶片下无观察记录: turbine={req.turbine_id} "
+            f"blade={req.blade_id} inspection_id={req.inspection_id}",
+        )
+
+    regions = [
+        cov.make_region(
+            r.radius_start, r.radius_end, r.clock_start, r.clock_end)
+        for r in req.regions
+    ]
+
+    items = [cov.check_observation(o, regions) for o in observations]
+    items.sort(key=lambda x: x["observation_id"])
+
+    checked = [x for x in items if x["status"] != "excluded"]
+    total_original = sum(x["original_area"] for x in checked)
+    total_covered = sum(x["covered_area"] for x in checked)
+    counts = {"uncovered": 0, "partial": 0, "full": 0}
+    for x in checked:
+        counts[x["status"]] += 1
+
+    summary = {
+        "observation_count": len(items),
+        "checked_count": len(checked),
+        "excluded_count": len(items) - len(checked),
+        "uncovered_count": counts["uncovered"],
+        "partial_count": counts["partial"],
+        "full_count": counts["full"],
+        "total_original_area": round(total_original, 4),
+        "total_covered_area": round(total_covered, 4),
+        "total_coverage_ratio": (
+            round(total_covered / total_original, 4)
+            if total_original > 1e-9 else None
+        ),
+    }
+
+    return {
+        "turbine_id": req.turbine_id,
+        "blade_id": req.blade_id,
+        "inspection_id": req.inspection_id,
+        "region_count": len(regions),
+        "summary": summary,
+        "results": items,
     }
 
 
