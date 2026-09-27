@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import db
+from . import geometry as geo
 from .clustering import (
     Observation,
     Ruling,
@@ -17,9 +18,15 @@ from .clustering import (
     build_all,
     build_trajectory,
     cluster_observations,
+    to_arc_cached,
 )
 from .matching import match_trajectory_clusters
-from .schemas import AdjudicationRequest, BatchWriteRequest, ObservationIn
+from .schemas import (
+    AdjudicationRequest,
+    BatchWriteRequest,
+    ObservationIn,
+    RepairCoverageRequest,
+)
 
 
 class ApiError(Exception):
@@ -477,6 +484,83 @@ def get_inspection_changes(turbine_id: str, blade_id: str,
         "persisting": persisting,
         "new": new,
         "disappeared": disappeared,
+    }
+
+
+# ---------------------------------------------------------- repair coverage
+
+# 面积/覆盖判定阈值：不超过该值视为零（端点相接或浮点尘埃）
+_AREA_EPS = 1e-9
+
+
+def get_repair_coverage(req: RepairCoverageRequest) -> Dict[str, Any]:
+    """只读修补覆盖核对。
+
+    - 读取该叶片指定巡检的全部原始观察；
+    - 对每条正面积观察，精确计算其矩形区域（径向区间 × 钟位弧）被全部
+      修补区域 *并集* 覆盖的面积（重叠修补只计一次，不用外包框或采样代替）；
+    - 零面积观察（径向零长或钟位单点）不参与核对，单列返回；
+    - 空修补区域列表表示无修补，全部观察为未覆盖；
+    - 全程只读，不改写观察、人工裁决或复核结果。
+    """
+    regions = [
+        (r.radius_start, r.radius_end, geo.to_arc(r.clock_start, r.clock_end))
+        for r in req.repair_regions
+    ]
+
+    with db.get_conn() as conn:
+        rows = db.list_observations(conn, req.turbine_id, req.blade_id)
+
+    observations = [r for r in rows if r["inspection_id"] == req.inspection_id]
+    if not observations:
+        raise ApiError(404, f"该叶片下不存在巡检的观察记录: "
+                            f"inspection_id={req.inspection_id}")
+
+    checked: List[Dict[str, Any]] = []
+    zero_area: List[Dict[str, Any]] = []
+    total_area = 0.0
+    total_covered = 0.0
+    for row in observations:
+        obs = _row_to_observation(row)
+        arc = to_arc_cached(obs)
+        area = (obs.radius_end - obs.radius_start) * geo.arc_length(arc)
+        if area <= _AREA_EPS:
+            zero_area.append({"observation_id": obs.observation_id, "area": 0.0})
+            continue
+        covered = geo.union_covered_area(
+            obs.radius_start, obs.radius_end, arc, regions)
+        covered = max(0.0, min(covered, area))  # 浮点尘埃兜底
+        eps = _AREA_EPS * max(1.0, area)
+        if covered <= eps:
+            status = "uncovered"
+        elif area - covered <= eps:
+            status = "full"
+        else:
+            status = "partial"
+        total_area += area
+        total_covered += covered
+        checked.append({
+            "observation_id": obs.observation_id,
+            "area": round(area, 4),
+            "covered_area": round(covered, 4),
+            "coverage_ratio": round(covered / area, 4),
+            "status": status,
+        })
+
+    return {
+        "turbine_id": req.turbine_id,
+        "blade_id": req.blade_id,
+        "inspection_id": req.inspection_id,
+        "repair_region_count": len(regions),
+        "observation_count": len(observations),
+        "checked_count": len(checked),
+        "zero_area_count": len(zero_area),
+        "total_area": round(total_area, 4),
+        "total_covered_area": round(total_covered, 4),
+        "overall_coverage_ratio":
+            round(total_covered / total_area, 4) if total_area > 0.0 else 0.0,
+        "observations": checked,
+        "zero_area_observations": zero_area,
     }
 
 

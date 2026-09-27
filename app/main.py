@@ -20,6 +20,8 @@ from .schemas import (
     InspectionChangeReport,
     RecomputeRequest,
     RecomputeResponse,
+    RepairCoverageRequest,
+    RepairCoverageResponse,
     ReviewResponse,
 )
 
@@ -29,7 +31,8 @@ app = FastAPI(
         "接收多次巡检观察（距叶根径向区间 + 顺时针钟位区间 + 等级 + 置信度），"
         "将径向与钟位范围相交的观察聚为连通簇，合并为带来源清单的裂纹轨迹，"
         "并标注等级冲突。支持观察写入、复核查询、按批次幂等重算，"
-        "以及两期巡检间轨迹持续/新增/消失的只读变化报告。"
+        "以及两期巡检间轨迹持续/新增/消失的只读变化报告，"
+        "和修补区域对单次巡检观察覆盖情况的只读核对。"
     ),
     version="1.0.0",
 )
@@ -118,3 +121,13 @@ def get_inspection_changes(
     after: str = Query(..., description="后期巡检 inspection_id"),
 ) -> dict:
     return services.get_inspection_changes(turbine_id, blade_id, before, after)
+
+
+@app.post(
+    "/api/v1/repair-coverage",
+    tags=["修补核对"],
+    response_model=RepairCoverageResponse,
+    summary="只读修补覆盖核对：修补区域并集对单次巡检观察的覆盖面积与覆盖率",
+)
+def repair_coverage(payload: RepairCoverageRequest) -> dict:
+    return services.get_repair_coverage(payload)

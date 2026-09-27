@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 CLOCK_MAX = 12.0
 _EPS = 1e-9
@@ -85,6 +85,11 @@ def arc_overlap_length(a: Arc, b: Arc) -> float:
     return total
 
 
+def arc_length(arc: Arc) -> float:
+    """钟位弧的覆盖总长度（单点弧为 0）。"""
+    return sum(hi - lo for lo, hi in arc)
+
+
 def merge_segments(segments: List[Segment]) -> List[Segment]:
     """合并一组线性闭区间，端点相接即合并。"""
     if not segments:
@@ -114,6 +119,44 @@ def merge_arcs(arcs: List[Arc]) -> Tuple[List[Segment], float]:
     merged = merge_segments(flat)
     total = sum(hi - lo for lo, hi in merged)
     return merged, total
+
+
+def union_covered_area(radius_start: float, radius_end: float, arc: Arc,
+                       regions: Sequence[Tuple[float, float, Arc]]) -> float:
+    """目标矩形（径向区间 × 钟位弧）被修补区域 *并集* 覆盖的精确面积。
+
+    每个修补区域同样是 ``(径向起, 径向止, 钟位弧)`` 矩形。算法为精确解析
+    （不用外包框或采样代替）：
+
+    1. 把目标与全部修补区域的径向边界排序，切出一系列基本径向区间——
+       同一基本区间内“哪些修补区域覆盖它”是恒定的；
+    2. 对每个落在目标径向范围内的基本区间，把覆盖它的修补区域钟位弧
+       合并（并集）后与目标弧求交，面积 = 径向长度 × 钟位交集长度；
+    3. 逐段累加。修补区域之间的重叠由此只计一次。
+    """
+    if not regions:
+        return 0.0
+    cuts = {radius_start, radius_end}
+    for r_lo, r_hi, _ in regions:
+        cuts.add(r_lo)
+        cuts.add(r_hi)
+    ordered = sorted(cuts)
+    total = 0.0
+    for lo, hi in zip(ordered, ordered[1:]):
+        if hi - lo <= _EPS:
+            continue
+        if lo < radius_start - _EPS or hi > radius_end + _EPS:
+            continue
+        flat: List[Segment] = []
+        for r_lo, r_hi, r_arc in regions:
+            if r_lo <= lo + _EPS and r_hi >= hi - _EPS:
+                flat.extend(r_arc)
+        if not flat:
+            continue
+        clock_len = arc_overlap_length(arc, merge_segments(flat))
+        if clock_len > 0.0:
+            total += (hi - lo) * clock_len
+    return total
 
 
 def describe_clock(segments: List[Segment]) -> dict:

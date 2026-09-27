@@ -88,5 +88,49 @@ class TestOverlapLength(unittest.TestCase):
             1.0)
 
 
+class TestUnionCoveredArea(unittest.TestCase):
+    def test_arc_length(self):
+        self.assertAlmostEqual(geo.arc_length(geo.to_arc(1, 3)), 2.0)
+        self.assertAlmostEqual(geo.arc_length(geo.to_arc(11, 1)), 2.0)
+        self.assertEqual(geo.arc_length(geo.to_arc(4, 4)), 0.0)  # 单点
+
+    def test_no_regions(self):
+        self.assertEqual(
+            geo.union_covered_area(0, 10, geo.to_arc(1, 3), []), 0.0)
+
+    def test_single_region_exact(self):
+        # 目标 [0,10]×[1,3]；区域 [2,6]×[1.5,2.5] -> 4m × 1h = 4
+        covered = geo.union_covered_area(
+            0, 10, geo.to_arc(1, 3),
+            [(2, 6, geo.to_arc(1.5, 2.5))])
+        self.assertAlmostEqual(covered, 4.0)
+
+    def test_overlapping_regions_counted_once(self):
+        # 两个区域在 [4,6]×[2,3] 重叠；并集覆盖 = 4+4+2 = 10（非求和 12）
+        covered = geo.union_covered_area(
+            0, 10, geo.to_arc(1, 3),
+            [(2, 6, geo.to_arc(1, 3)), (4, 8, geo.to_arc(2, 4))])
+        self.assertAlmostEqual(covered, 10.0)
+
+    def test_wraps_twelve(self):
+        # 目标跨 12 点 [5,15]×11->1（面积 20）；区域 11.5->0.5 覆盖 1 小时
+        covered = geo.union_covered_area(
+            5, 15, geo.to_arc(11, 1),
+            [(5, 15, geo.to_arc(11.5, 0.5))])
+        self.assertAlmostEqual(covered, 10.0)
+
+    def test_region_outside_target(self):
+        covered = geo.union_covered_area(
+            0, 10, geo.to_arc(1, 3),
+            [(20, 30, geo.to_arc(1, 3)), (0, 10, geo.to_arc(5, 6))])
+        self.assertEqual(covered, 0.0)
+
+    def test_covering_region_gives_full_area(self):
+        covered = geo.union_covered_area(
+            0, 10, geo.to_arc(1, 3),
+            [(0, 10, geo.to_arc(0, 6))])
+        self.assertAlmostEqual(covered, 20.0)
+
+
 if __name__ == "__main__":
     unittest.main()

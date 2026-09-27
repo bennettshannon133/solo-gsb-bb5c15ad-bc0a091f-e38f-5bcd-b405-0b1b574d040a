@@ -10,6 +10,9 @@
   重算时先应用必须同轨关系的传递闭包，再校验禁止同轨关系，冲突时返回 `409` 与冲突裁决链且**不改写旧结果**；
 - 提供**只读巡检变化报告**：输入风机、叶片与前后两个 `inspection_id`，对比两期轨迹的
   **持续 / 新增 / 消失**，跨期配对按“正长度重叠面积”加权并求**全局最大权一对一匹配**；
+- 提供**只读修补覆盖核对**：输入风机、叶片、`inspection_id` 与修补区域列表，逐条计算该巡检
+  观察被修补区域**并集**覆盖的面积（径向米 × 钟位小时，重叠修补只计一次，精确解析、不用
+  外包框或采样代替），给出覆盖率与未覆盖/部分覆盖/全覆盖状态；
 - 依赖安装、SQLite 建表与数据库初始化均随容器启动自动完成。
 
 ## 单条命令启动
@@ -92,6 +95,7 @@ docker compose up -d --build
 | POST | `/adjudications` | 提交人工关联裁决（必须同轨/禁止同轨，乐观锁，幂等） |
 | GET | `/adjudications/{turbine_id}/{blade_id}` | 查询某叶片的全部裁决与当前 revision |
 | GET | `/inspection-changes/{turbine_id}/{blade_id}` | 只读巡检变化报告（两期轨迹持续/新增/消失对比） |
+| POST | `/repair-coverage` | 只读修补覆盖核对（修补区域并集对单次巡检观察的覆盖面积/覆盖率） |
 
 ### 1. 写入观察批次
 
@@ -369,6 +373,74 @@ curl -s "http://localhost:8000/api/v1/inspection-changes/WT-A01/B2?before=drone-
 - 持续轨迹给出**代表等级与径向范围的前后值**以及**双方来源观察 ID**；`weight` 为配对权重（重叠面积之和）。
 - 轨迹 ID 与复核结果一致（同成员观察集合哈希），可与 `GET /reviews/...` 对照。
 
+### 7. 修补覆盖核对（只读）
+
+`POST http://localhost:8000/api/v1/repair-coverage`
+
+核对某次巡检的观察被**修补区域并集**覆盖的程度。接口只读、实时计算，
+**不修改任何观察、人工裁决或复核结果**（端口随 `API_PORT` 环境变量调整，默认 `8000`）。
+
+请求体：
+
+```json
+{
+  "turbine_id": "WT-A01",
+  "blade_id": "B2",
+  "inspection_id": "drone-0901",
+  "repair_regions": [
+    { "radius_start": 2.0, "radius_end": 4.0, "clock_start": 11.5, "clock_end": 0.5 },
+    { "radius_start": 3.0, "radius_end": 5.0, "clock_start": 11.0, "clock_end": 12.0 }
+  ]
+}
+```
+
+- `repair_regions` 中每个区域**沿用观察的径向区间与顺时针钟位字段及校验**
+  （`radius_end >= radius_start >= 0`，钟位 `[0, 12]`，允许跨 12 点）；
+  非法区域（含多余/缺失字段）返回 `422`；
+- `repair_regions` 为**空列表**表示无修补：全部观察为未覆盖（`coverage_ratio=0`）；
+- 该 `inspection_id` 在此叶片下无观察记录时返回 `404`。
+
+覆盖面积计算规则：
+
+- 观察面积为**径向长度（米）× 钟位弧长（小时）**；
+- 覆盖面积为观察矩形与全部修补区域**并集**的交集面积：把所有径向边界切成基本区间，
+  每个基本区间内将覆盖它的修补区域钟位弧合并（并集）后与观察弧求交，逐段累加——
+  **重叠修补只计一次**，为精确解析结果，不用外包框或采样代替；
+- **零面积观察**（径向零长或钟位单点）不参与核对，单列于 `zero_area_observations`。
+
+响应（节选）：
+
+```json
+{
+  "turbine_id": "WT-A01",
+  "blade_id": "B2",
+  "inspection_id": "drone-0901",
+  "repair_region_count": 2,
+  "observation_count": 3,
+  "checked_count": 2,
+  "zero_area_count": 1,
+  "total_area": 14.0,
+  "total_covered_area": 3.5,
+  "overall_coverage_ratio": 0.25,
+  "observations": [
+    {
+      "observation_id": "s1",
+      "area": 8.0,
+      "covered_area": 3.5,
+      "coverage_ratio": 0.4375,
+      "status": "partial"
+    },
+    { "observation_id": "s2", "area": 6.0, "covered_area": 0.0, "coverage_ratio": 0.0, "status": "uncovered" }
+  ],
+  "zero_area_observations": [
+    { "observation_id": "s3", "area": 0.0 }
+  ]
+}
+```
+
+`status` 取值：`uncovered`（未覆盖）/ `partial`（部分覆盖）/ `full`（全覆盖）；
+顶层同时给出参与核对观察的面积合计与整体覆盖率。
+
 ## curl 快速验证
 
 ```bash
@@ -419,10 +491,10 @@ python -m unittest discover -s tests -v
 ├── app/
 │   ├── main.py         # FastAPI 入口、路由、startup 建表
 │   ├── schemas.py      # Pydantic 请求/响应模型与字段校验
-│   ├── services.py     # 写入幂等、重算、查询、巡检变化报告业务逻辑
+│   ├── services.py     # 写入幂等、重算、查询、巡检变化报告、修补覆盖核对业务逻辑
 │   ├── clustering.py   # 并查集聚类 + 轨迹合并
 │   ├── matching.py     # 跨期轨迹配对：重叠面积加权 + 全局最大权一对一匹配
-│   ├── geometry.py     # 径向/钟位弧相交、重叠长度与合并（含跨 12 点）
+│   ├── geometry.py     # 径向/钟位弧相交、重叠长度与合并（含跨 12 点）、修补并集覆盖面积
 │   └── db.py           # SQLite 连接、schema 初始化、数据访问
 ├── tests/              # 几何 / 聚类 / 匹配 / 端到端 API 测试
 ├── Dockerfile

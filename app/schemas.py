@@ -237,3 +237,76 @@ class InspectionChangeReport(BaseModel):
     disappeared: List[ChangeTrajectorySide] = Field(
         default_factory=list, description="消失轨迹：仅前期出现的轨迹",
     )
+
+
+class RepairRegion(BaseModel):
+    """修补区域：沿用观察的径向区间 + 顺时针钟位字段及校验（允许跨 12 点）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    radius_start: float = Field(..., ge=0.0, description="距叶根起始位置（米，沿展向）")
+    radius_end: float = Field(..., ge=0.0, description="距叶根终止位置（米，沿展向）")
+    clock_start: float = Field(..., ge=0.0, le=12.0, description="起始钟位（0/12 均为 12 点）")
+    clock_end: float = Field(..., ge=0.0, le=12.0, description="终止钟位，沿顺时针；起止相等为单点")
+
+    @field_validator("radius_end")
+    @classmethod
+    def _radius_order(cls, v, info):
+        start = info.data.get("radius_start")
+        if start is not None and v < start:
+            raise ValueError("radius_end 必须 >= radius_start")
+        return v
+
+
+class RepairCoverageRequest(BaseModel):
+    """修补覆盖核对请求（只读，不改写任何已落库数据）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    turbine_id: str = Field(..., max_length=64, description="风机编号")
+    blade_id: str = Field(..., max_length=64, description="叶片编号")
+    inspection_id: str = Field(..., max_length=64, description="巡检批次/航次编号")
+    repair_regions: List[RepairRegion] = Field(
+        default_factory=list,
+        description="修补区域列表；空列表表示无修补（全部观察均为未覆盖）",
+    )
+
+
+class RepairCoverageItem(BaseModel):
+    """单条正面积观察的修补覆盖核对结果。"""
+
+    observation_id: str
+    area: float = Field(..., description="观察原面积（径向米 × 钟位小时）")
+    covered_area: float = Field(..., description="被修补区域并集覆盖的面积（重叠修补只计一次）")
+    coverage_ratio: float = Field(..., description="覆盖率 = 覆盖面积 / 原面积")
+    status: Literal["uncovered", "partial", "full"] = Field(
+        ..., description="uncovered=未覆盖, partial=部分覆盖, full=全覆盖",
+    )
+
+
+class ZeroAreaObservation(BaseModel):
+    """零面积观察：不参与核对，单列返回。"""
+
+    observation_id: str
+    area: float = Field(..., description="观察原面积（为 0，不参与覆盖核对）")
+
+
+class RepairCoverageResponse(BaseModel):
+    """修补覆盖核对报告（只读，实时计算）。"""
+
+    turbine_id: str
+    blade_id: str
+    inspection_id: str
+    repair_region_count: int
+    observation_count: int
+    checked_count: int = Field(..., description="参与核对的正面积观察条数")
+    zero_area_count: int = Field(..., description="不参与核对的零面积观察条数")
+    total_area: float = Field(..., description="参与核对观察的原面积之和")
+    total_covered_area: float = Field(..., description="参与核对观察的覆盖面积之和")
+    overall_coverage_ratio: float = Field(..., description="整体覆盖率 = 覆盖面积之和 / 原面积之和")
+    observations: List[RepairCoverageItem] = Field(
+        default_factory=list, description="参与核对观察的逐条覆盖结果",
+    )
+    zero_area_observations: List[ZeroAreaObservation] = Field(
+        default_factory=list, description="零面积观察，不参与核对",
+    )
